@@ -4,11 +4,12 @@ import (
 	"crypto/rand"
 	"flag"
 	"fmt"
-	"golang.org/x/crypto/nacl/box"
 	"io"
 	"log"
 	"net"
 	"os"
+
+	"golang.org/x/crypto/nacl/box"
 )
 
 const (
@@ -18,8 +19,8 @@ const (
 
 // secureReader implements the io.Reader interface to read and decrypt messages.
 type secureReader struct {
-	r         io.Reader
-	priv, pub *[keysz]byte
+	r   io.Reader
+	key *[keysz]byte
 }
 
 // Read reads encrypted bytes from the Reader, decrypts the bytes and copies
@@ -47,7 +48,7 @@ func (sr *secureReader) Read(p []byte) (int, error) {
 	}
 	// TODO: Must handle scenario where n < len(encrptd)
 
-	decrypted, ok := box.Open(nil, encrptd[:n], &nonce, sr.pub, sr.priv)
+	decrypted, ok := box.OpenAfterPrecomputation(nil, encrptd[:n], &nonce, sr.key)
 	if !ok {
 		return n, fmt.Errorf("secureReader.Read: Error decrypting data")
 	}
@@ -57,13 +58,15 @@ func (sr *secureReader) Read(p []byte) (int, error) {
 
 // NewSecureReader instantiates a new SecureReader
 func NewSecureReader(r io.Reader, priv, pub *[keysz]byte) io.Reader {
-	return &secureReader{r, priv, pub}
+	sr := &secureReader{r: r, key: &[keysz]byte{}}
+	box.Precompute(sr.key, pub, priv)
+	return sr
 }
 
 // secureWriter implements the io.Writer interface to write encrypted messages.
 type secureWriter struct {
-	w         io.Writer
-	priv, pub *[keysz]byte
+	w   io.Writer
+	key *[keysz]byte
 }
 
 // Write encrypts the bytes in p then copies the encrytped bytes to the Writer.
@@ -71,7 +74,8 @@ func (sw *secureWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-
+	
+	// Generate the nonce
 	var nonce [noncesz]byte
 	n, err := rand.Read(nonce[:])
 	if err != nil {
@@ -90,12 +94,19 @@ func (sw *secureWriter) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("secureWriter.Write: only wrote %d bytes for nouce", n)
 	}
 
-	return sw.w.Write(box.Seal(nil, p, &nonce, sw.pub, sw.priv))
+	encrptd := box.SealAfterPrecomputation(nil, p, &nonce, sw.key)
+	n, err = sw.w.Write(encrptd)
+	if n > box.Overhead {
+		n -= box.Overhead
+	}
+	return n, err
 }
 
 // NewSecureWriter instantiates a new SecureWriter
 func NewSecureWriter(w io.Writer, priv, pub *[keysz]byte) io.Writer {
-	return &secureWriter{w, priv, pub}
+	sw := &secureWriter{w: w, key: &[keysz]byte{}}
+	box.Precompute(sw.key, pub, priv)
+	return sw
 }
 
 // secureReadWriter implements the io.ReadWriteCloser interface to read and
@@ -127,7 +138,7 @@ func (srw *secureReadWriter) Close() error {
 	return srw.rwc.Close()
 }
 
-// Dial generates a private/public key pair, connects to the server, perform
+// Dial generates a private/public key pair, connects to the server, performs
 // the handshake and return a reader/writer.
 func Dial(addr string) (io.ReadWriteCloser, error) {
 	conn, err := net.Dial("tcp", addr)
@@ -152,13 +163,13 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 		return nil, fmt.Errorf("Dial: could only read <%d> bytes of server's public key.", n)
 	}
 
-	// Generate key-pair for public key exchange (handshake)
+	// Generate client's key-pair for public key exchange (handshake)
 	pub, priv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
 
-	// Send public key to server. The server uses the client's public key, along
+	// Send client's public key to server. The server uses the client's public key, along
 	//	with the server's private key to encrypt/decrypt messages.
 	n, err = conn.Write(pub[:])
 	if err != nil {
