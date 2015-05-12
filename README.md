@@ -14,4 +14,6 @@ caller's buffer small.
 
 * I need to read up pn embedded struct. My code for read/write/closer could be
 made more simple
- 
+
+* It appears to be a Go convention to separate with a blank line golang.org
+packages from standard packages. Why?  
